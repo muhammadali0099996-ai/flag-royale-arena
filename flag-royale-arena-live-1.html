@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Flag Royale Arena</title>
+<style>
+  html,body{margin:0;height:100%;background:#05030f;overflow:hidden;font-family:"Segoe UI",Arial,sans-serif;color:#fff}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;width:min(100vw,calc(100vh * 9 / 16));height:min(100vh,calc(100vw * 16 / 9))}
+  @supports (height:100dvh){canvas{width:min(100vw,calc(100dvh * 9 / 16));height:min(100dvh,calc(100vw * 16 / 9))}}
+  #panel{position:fixed;left:10px;top:10px;width:260px;padding:12px;border-radius:14px;background:rgba(10,6,30,.88);
+    border:1px solid rgba(80,220,255,.5);box-shadow:0 0 20px rgba(80,220,255,.25);font-size:14px;z-index:5}
+  #panel b{display:block;margin-bottom:8px;color:#5fe6ff}
+  #panel input[type=text]{width:100%;box-sizing:border-box;padding:9px;border-radius:8px;border:1px solid #3a3a7a;background:#120a35;color:#fff;font-size:15px}
+  .row{display:flex;gap:6px;margin:8px 0}
+  button{flex:1;padding:9px 4px;border:0;border-radius:8px;background:linear-gradient(135deg,#7b3cff,#ff3cac);color:#fff;font-weight:700;font-size:14px}
+  button:active{transform:scale(.96)}
+  label{display:block;margin:6px 0;font-size:13px}
+  small{opacity:.65;font-size:11px}
+  @media (max-aspect-ratio:9/14){#panel{left:8px;right:8px;top:auto;bottom:8px;width:auto}}
+  body.clean #panel{display:none}
+
+  .connection{display:flex;align-items:center;gap:7px;margin:7px 0;padding:7px 9px;border-radius:8px;background:rgba(255,255,255,.07);font-size:12px}
+  .dot{width:9px;height:9px;border-radius:50%;background:#e7a43b;box-shadow:0 0 8px currentColor;flex:none}
+  .dot.online{background:#42e58b}.dot.error{background:#ff526d}
+  #panel input[type=text]{margin:3px 0 6px}
+  #panel label{margin:5px 0}
+  #panel .row{align-items:center}
+  #panel .row input[type=text]{min-width:0;flex:2}
+  #panel button:disabled{opacity:.45;filter:grayscale(1)}
+  #panel button.secondary{background:linear-gradient(135deg,#39415e,#20283e)}
+  #bridgeHelp,#lastEvent{font-size:11px;line-height:1.35;color:#c9c5e8;margin:5px 0;padding:7px;background:rgba(255,255,255,.05);border-radius:7px;overflow-wrap:anywhere}
+  .stats{display:flex;justify-content:space-between;font-size:11px;color:#b9b4dc;margin:5px 0}
+  #panel{max-height:calc(100dvh - 20px);overflow:auto;box-sizing:border-box}
+
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="panel">
+  <b>FLAG ROYALE · LIVE CONTROL</b>
+  <div class="connection"><span id="connDot" class="dot"></span><span id="connStatus">Demo mode · Not connected</span></div>
+  <label for="wsEndpoint">TikFinity WebSocket endpoint</label>
+  <input type="text" id="wsEndpoint" value="ws://localhost:21213/" autocomplete="off" spellcheck="false">
+  <div class="row"><button id="bConnect">Connect LIVE</button><button id="bDisconnect" class="secondary" disabled>Disconnect</button></div>
+  <div id="bridgeHelp">Configure your LIVE username in TikFinity Desktop, start its LIVE connection, then connect here. Both apps must run on this computer.</div>
+  <div class="row"><input type="text" id="inp" placeholder="Test country, e.g. Pakistan" autocomplete="off"><button id="bJoin">Join</button></div>
+  <div class="row"><button id="bRand">Demo +1</button><button id="b10">Demo +10</button><button id="bClr" class="secondary">Reset</button></div>
+  <label><input type="checkbox" id="auto"> automatic demo joins</label>
+  <div class="stats"><span>Events: <strong id="eventCount">0</strong></span><span>Reconnects: <strong id="reconnectCount">0</strong></span></div>
+  <div id="lastEvent" aria-live="polite">Waiting for events…</div>
+  <small>H hides this panel. LIVE events only work after a real bridge connection.</small>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   FLAG ROYALE ARENA  -  Step 1
+   Background, arena, rotating obstacles, flag balls, join feed.
+   Layout is 1080x1920 (9:16) with TikTok safe areas in mind:
+   top ~300px and bottom ~420px are covered by the TikTok UI.
+   ============================================================ */
+const W = 1080, H = 1920;
+const CX = 540, CY = 900;          // arena centre
+const AR = 410;                    // arena inner radius
+const CORE = 80;                   // centre core radius
+const SPOKE_IN = 80, SPOKE_OUT = 260, SPOKE_HALF = 11;
+const PEG_R = 18, PEG_RING = 335, PEG_COUNT = 8;
+const MIN_V = 240, MAX_V = 560;
+
+const cv = document.getElementById('c');
+cv.width = W; cv.height = H;
+const ctx = cv.getContext('2d');
+
+/* ---------------- flags (drawn with code, no downloads) ---------------- */
+function hs(g, cols, w) { const t = w ? w.reduce((a, b) => a + b) : cols.length; let y = 0;
+  cols.forEach((c, i) => { const h = 100 * (w ? w[i] : 1) / t; g.fillStyle = c; g.fillRect(0, y, 100, h + .6); y += h; }); }
+function vs(g, cols, w) { const t = w ? w.reduce((a, b) => a + b) : cols.length; let x = 0;
+  cols.forEach((c, i) => { const ww = 100 * (w ? w[i] : 1) / t; g.fillStyle = c; g.fillRect(x, 0, ww + .6, 100); x += ww; }); }
+function circ(g, x, y, r, c) { g.fillStyle = c; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill(); }
+function star(g, x, y, R, c) { g.fillStyle = c; g.beginPath();
+  for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? R * .4 : R; g.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+  g.closePath(); g.fill(); }
+function crescent(g, x, y, r, c, bg) { circ(g, x, y, r, c); circ(g, x + r * .36, y, r * .8, bg); }
+function poly(g, pts, c) { g.fillStyle = c; g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); g.fill(); }
+function line(g, a, b, c, d, col, w) { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); g.moveTo(a, b); g.lineTo(c, d); g.stroke(); }
+
+const FLAGS = [
+  { code: 'PK', name: 'Pakistan', names: ['pakistan', 'pak', 'pk', 'pakistani'], draw: g => { g.fillStyle = '#01411C'; g.fillRect(0, 0, 100, 100); g.fillStyle = '#fff'; g.fillRect(0, 0, 25, 100); crescent(g, 62, 52, 24, '#fff', '#01411C'); star(g, 76, 36, 9, '#fff'); } },
+  { code: 'IN', name: 'India', names: ['india', 'ind', 'indian', 'bharat'], draw: g => { hs(g, ['#FF9933', '#fff', '#138808']); g.strokeStyle = '#000080'; g.lineWidth = 3; g.beginPath(); g.arc(50, 50, 13, 0, 7); g.stroke(); circ(g, 50, 50, 3, '#000080'); } },
+  { code: 'US', name: 'USA', names: ['usa', 'america', 'united states', 'american'], draw: g => { for (let i = 0; i < 13; i++) { g.fillStyle = i % 2 ? '#fff' : '#B22234'; g.fillRect(0, i * 100 / 13, 100, 100 / 13 + .6); } g.fillStyle = '#3C3B6E'; g.fillRect(0, 0, 46, 54); for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) circ(g, 6 + c * 11, 7 + r * 12, 2, '#fff'); } },
+  { code: 'JP', name: 'Japan', names: ['japan', 'jp', 'jpn', 'japanese'], draw: g => { g.fillStyle = '#fff'; g.fillRect(0, 0, 100, 100); circ(g, 50, 50, 25, '#BC002D'); } },
+  { code: 'BD', name: 'Bangladesh', names: ['bangladesh', 'bd', 'bangla', 'bengali'], draw: g => { g.fillStyle = '#006A4E'; g.fillRect(0, 0, 100, 100); circ(g, 46, 50, 24, '#F42A41'); } },
+  { code: 'DE', name: 'Germany', names: ['germany', 'deutschland', 'german'], draw: g => hs(g, ['#000', '#DD0000', '#FFCE00']) },
+  { code: 'FR', name: 'France', names: ['france', 'french'], draw: g => vs(g, ['#0055A4', '#fff', '#EF4135']) },
+  { code: 'IT', name: 'Italy', names: ['italy', 'italia', 'italian'], draw: g => vs(g, ['#009246', '#fff', '#CE2B37']) },
+  { code: 'RU', name: 'Russia', names: ['russia', 'ru', 'russian'], draw: g => hs(g, ['#fff', '#0039A6', '#D52B1E']) },
+  { code: 'BR', name: 'Brazil', names: ['brazil', 'brasil', 'br', 'brazilian'], draw: g => { g.fillStyle = '#009C3B'; g.fillRect(0, 0, 100, 100); poly(g, [[50, 12], [92, 50], [50, 88], [8, 50]], '#FFDF00'); circ(g, 50, 50, 20, '#002776'); line(g, 32, 50, 68, 46, '#fff', 4); } },
+  { code: 'TR', name: 'Turkey', names: ['turkey', 'turkiye', 'türkiye', 'tr', 'turkish'], draw: g => { g.fillStyle = '#E30A17'; g.fillRect(0, 0, 100, 100); crescent(g, 40, 50, 25, '#fff', '#E30A17'); star(g, 64, 50, 9, '#fff'); } },
+  { code: 'CN', name: 'China', names: ['china', 'cn', 'chinese'], draw: g => { g.fillStyle = '#DE2910'; g.fillRect(0, 0, 100, 100); star(g, 24, 27, 15, '#FFDE00'); star(g, 47, 12, 5, '#FFDE00'); star(g, 56, 25, 5, '#FFDE00'); star(g, 56, 40, 5, '#FFDE00'); star(g, 47, 52, 5, '#FFDE00'); } },
+  { code: 'ID', name: 'Indonesia', names: ['indonesia', 'indonesian'], draw: g => hs(g, ['#E70011', '#fff']) },
+  { code: 'UA', name: 'Ukraine', names: ['ukraine', 'ua', 'ukrainian'], draw: g => hs(g, ['#0057B7', '#FFD700']) },
+  { code: 'NL', name: 'Netherlands', names: ['netherlands', 'holland', 'nl', 'dutch'], draw: g => hs(g, ['#AE1C28', '#fff', '#21468B']) },
+  { code: 'ES', name: 'Spain', names: ['spain', 'espana', 'españa', 'spanish'], draw: g => hs(g, ['#AA151B', '#F1BF00', '#AA151B'], [1, 2, 1]) },
+  { code: 'MX', name: 'Mexico', names: ['mexico', 'mx', 'mexican'], draw: g => { vs(g, ['#006847', '#fff', '#CE1126']); circ(g, 50, 50, 9, '#8a5a2b'); } },
+  { code: 'NG', name: 'Nigeria', names: ['nigeria', 'ng', 'nigerian'], draw: g => vs(g, ['#008751', '#fff', '#008751']) },
+  { code: 'EG', name: 'Egypt', names: ['egypt', 'eg', 'egyptian'], draw: g => { hs(g, ['#CE1126', '#fff', '#000']); circ(g, 50, 50, 7, '#C09300'); } },
+  { code: 'GB', name: 'UK', names: ['uk', 'england', 'britain', 'united kingdom', 'great britain', 'british'], draw: g => { g.fillStyle = '#012169'; g.fillRect(0, 0, 100, 100); line(g, 0, 0, 100, 100, '#fff', 18); line(g, 100, 0, 0, 100, '#fff', 18); line(g, 0, 0, 100, 100, '#C8102E', 6); line(g, 100, 0, 0, 100, '#C8102E', 6); g.fillStyle = '#fff'; g.fillRect(40, 0, 20, 100); g.fillRect(0, 40, 100, 20); g.fillStyle = '#C8102E'; g.fillRect(44, 0, 12, 100); g.fillRect(0, 44, 100, 12); } },
+  { code: 'SA', name: 'Saudi Arabia', names: ['saudi arabia', 'saudi', 'ksa'], draw: g => { g.fillStyle = '#006C35'; g.fillRect(0, 0, 100, 100); g.fillStyle = '#fff'; g.fillRect(20, 40, 60, 7); g.fillRect(24, 62, 52, 5); } },
+  { code: 'KR', name: 'South Korea', names: ['south korea', 'korea', 'kr', 'korean'], draw: g => { g.fillStyle = '#fff'; g.fillRect(0, 0, 100, 100); circ(g, 50, 50, 22, '#CD2E3A'); g.fillStyle = '#0047A0'; g.beginPath(); g.arc(50, 50, 22, 0, Math.PI); g.fill(); line(g, 14, 20, 28, 12, '#000', 4); line(g, 72, 88, 86, 80, '#000', 4); } },
+  { code: 'CA', name: 'Canada', names: ['canada', 'canadian'], draw: g => { vs(g, ['#D80621', '#fff', '#D80621'], [1, 2, 1]); star(g, 50, 50, 20, '#D80621'); } },
+  { code: 'PH', name: 'Philippines', names: ['philippines', 'ph', 'pinas', 'filipino'], draw: g => { hs(g, ['#0038A8', '#CE1126']); poly(g, [[0, 0], [48, 50], [0, 100]], '#fff'); circ(g, 14, 50, 5, '#FCD116'); } },
+  { code: 'AR', name: 'Argentina', names: ['argentina', 'argentinian'], draw: g => { hs(g, ['#74ACDF', '#fff', '#74ACDF']); circ(g, 50, 50, 8, '#F6B40E'); } }
+];
+const FBYCODE = {};
+FLAGS.forEach(f => { FBYCODE[f.code] = f; f.img = makeFlag(f); });
+
+function makeFlag(f) {
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d');
+  g.save(); g.beginPath(); g.arc(S / 2, S / 2, S / 2 - 3, 0, 7); g.clip();
+  g.scale(S / 100, S / 100); f.draw(g); g.restore();
+  const sh = g.createLinearGradient(0, 0, S, S);
+  sh.addColorStop(0, 'rgba(255,255,255,.32)'); sh.addColorStop(.5, 'rgba(255,255,255,0)'); sh.addColorStop(1, 'rgba(0,0,0,.28)');
+  g.fillStyle = sh; g.beginPath(); g.arc(S / 2, S / 2, S / 2 - 3, 0, 7); g.fill();
+  g.lineWidth = 5; g.strokeStyle = '#fff'; g.beginPath(); g.arc(S / 2, S / 2, S / 2 - 3, 0, 7); g.stroke();
+  return c;
+}
+
+/* ---------------- chat text -> country ---------------- */
+function parseCountry(text) {
+  const cps = [...text].map(ch => ch.codePointAt(0)).filter(c => c >= 0x1F1E6 && c <= 0x1F1FF);
+  if (cps.length >= 2) {
+    const code = String.fromCharCode(65 + cps[0] - 0x1F1E6, 65 + cps[1] - 0x1F1E6);
+    if (FBYCODE[code]) return FBYCODE[code];
+  }
+  const norm = ' ' + text.toLowerCase().replace(/[^a-z\u00c0-\u024f ]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';
+  for (const f of FLAGS) for (const a of f.names) if (norm.includes(' ' + a + ' ')) return f;
+  return null;
+}
+
+/* ---------------- static background (drawn once) ---------------- */
+function hex(g, x, y, s) { g.beginPath(); for (let i = 0; i < 6; i++) { const a = Math.PI / 3 * i; g.lineTo(x + Math.cos(a) * s, y + Math.sin(a) * s); } g.closePath(); g.stroke(); }
+
+const stars = [];
+for (let i = 0; i < 160; i++) stars.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2.2 + .4, p: Math.random() * 6.28, s: .6 + Math.random() * 1.8 });
+
+function buildBackground() {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  // deep space gradient
+  let gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, '#0b0422'); gr.addColorStop(.5, '#14073f'); gr.addColorStop(1, '#04010f');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  // nebula clouds
+  [[180, 260, 560, 'rgba(130,50,255,.38)'], [940, 640, 620, 'rgba(0,200,255,.22)'],
+   [260, 1500, 680, 'rgba(255,50,170,.22)'], [900, 1700, 520, 'rgba(70,90,255,.28)'],
+   [540, 900, 760, 'rgba(90,40,200,.25)']].forEach(([x, y, r, col]) => {
+    const rg = g.createRadialGradient(x, y, 0, x, y, r);
+    rg.addColorStop(0, col); rg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = rg; g.fillRect(0, 0, W, H);
+  });
+  // faint speed rays from the arena
+  g.save(); g.translate(CX, CY);
+  for (let i = 0; i < 36; i++) {
+    g.rotate(Math.PI * 2 / 36);
+    const lg = g.createLinearGradient(AR + 60, 0, 1300, 0);
+    lg.addColorStop(0, 'rgba(120,170,255,.10)'); lg.addColorStop(1, 'rgba(120,170,255,0)');
+    g.fillStyle = lg; g.beginPath(); g.moveTo(AR + 60, -6); g.lineTo(1300, -40); g.lineTo(1300, 40); g.lineTo(AR + 60, 6); g.closePath(); g.fill();
+  }
+  g.restore();
+  // arena floor
+  const fl = g.createRadialGradient(CX, CY, 20, CX, CY, AR);
+  fl.addColorStop(0, '#2a1470'); fl.addColorStop(.6, '#150a45'); fl.addColorStop(1, '#070320');
+  g.fillStyle = fl; g.beginPath(); g.arc(CX, CY, AR, 0, 7); g.fill();
+  // hex grid inside arena
+  g.save(); g.beginPath(); g.arc(CX, CY, AR, 0, 7); g.clip();
+  g.strokeStyle = 'rgba(110,180,255,.17)'; g.lineWidth = 2;
+  const s = 44, h = s * Math.sqrt(3);
+  for (let col = -12; col <= 12; col++) for (let row = -12; row <= 12; row++) hex(g, CX + col * s * 1.5, CY + row * h + (col & 1 ? h / 2 : 0), s - 2);
+  // concentric guide rings
+  g.strokeStyle = 'rgba(255,255,255,.07)'; g.lineWidth = 3;
+  [AR * .33, AR * .66].forEach(r => { g.beginPath(); g.arc(CX, CY, r, 0, 7); g.stroke(); });
+  // vignette inside arena
+  const vg = g.createRadialGradient(CX, CY, AR * .55, CX, CY, AR);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,10,.55)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  g.restore();
+  // outer frame rings
+  g.lineWidth = 3; g.strokeStyle = 'rgba(120,200,255,.25)';
+  [AR + 44, AR + 70].forEach(r => { g.beginPath(); g.arc(CX, CY, r, 0, 7); g.stroke(); });
+  // tick marks
+  g.strokeStyle = 'rgba(180,220,255,.35)'; g.lineWidth = 3;
+  for (let i = 0; i < 72; i++) { const a = i * Math.PI / 36, r1 = AR + 78, r2 = AR + (i % 6 ? 86 : 98);
+    g.beginPath(); g.moveTo(CX + Math.cos(a) * r1, CY + Math.sin(a) * r1); g.lineTo(CX + Math.cos(a) * r2, CY + Math.sin(a) * r2); g.stroke(); }
+  // bottom panel glow for the join feed
+  const bp = g.createLinearGradient(0, 1340, 0, 1560);
+  bp.addColorStop(0, 'rgba(0,0,0,0)'); bp.addColorStop(1, 'rgba(0,0,0,.35)');
+  g.fillStyle = bp; g.fillRect(0, 1340, W, 220);
+  return c;
+}
+const BG = buildBackground();
+
+/* ---------------- game state ---------------- */
+const balls = [];
+const particles = [];
+const feed = [];
+const userCountry = {};
+let t = 0, spokeAngle = 0, omega = 0.6, corePulse = 0, totalJoins = 0, round = 1;
+const pegs = [];
+for (let i = 0; i < PEG_COUNT; i++) {
+  const a = (i + .5) * Math.PI * 2 / PEG_COUNT;
+  pegs.push({ x: CX + Math.cos(a) * PEG_RING, y: CY + Math.sin(a) * PEG_RING, flash: 0 });
+}
+
+const FAKE_USERS = ['ali_khan', 'sara.k', 'mike99', 'zoya', 'dev_raj', 'hana', 'carlos_', 'luna', 'omar', 'yuki', 'tariq', 'emma', 'bilal', 'nora', 'ivan', 'faisal', 'mia', 'rafi'];
+
+function radiusFor(b) { return 32 + Math.min(b.power - 1, 8) * 1.5; }
+
+function burst(x, y, n, color, speed) {
+  for (let i = 0; i < n && particles.length < 500; i++) {
+    const a = Math.random() * 6.28, v = speed * (.3 + Math.random());
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: .5 + Math.random() * .4, max: 1, color });
+  }
+}
+
+function addFeed(f, user, text) { feed.unshift({ img: f.img, text: user + '  ' + text, age: 0 }); if (feed.length > 4) feed.pop(); }
+
+function joinCountry(f, user) {
+  user = user || 'viewer';
+  userCountry[user] = f;
+  totalJoins++;
+  let b = balls.find(b => b.f === f);
+  if (b) {
+    b.power++; b.r = radiusFor(b); b.pulse = 1;
+    addFeed(f, user, '+1 power for ' + f.name);
+    burst(b.x, b.y, 10, '#ffe066', 220);
+    return b;
+  }
+  const a = Math.random() * 6.28, rr = 340 + Math.random() * 40;
+  const sp = 300, ang = Math.random() * 6.28;
+  b = { f, x: CX + Math.cos(a) * rr, y: CY + Math.sin(a) * rr, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, power: 1, r: 32, pulse: 1 };
+  balls.push(b);
+  addFeed(f, user, 'joined as ' + f.name);
+  burst(b.x, b.y, 22, '#5fe6ff', 300);
+  return b;
+}
+
+function handleChat(user, text) {
+  const f = parseCountry(text);
+  if (f) joinCountry(f, user);
+  return !!f;
+}
+function handleGift(user, giftName, diamonds) {
+  const f = userCountry[user]; if (!f) return;
+  const b = balls.find(b => b.f === f); if (!b) return;
+  b.power += Math.max(1, Math.round((diamonds || 1) / 10)); b.r = radiusFor(b); b.pulse = 1;
+  burst(b.x, b.y, 30, '#ff7ad9', 320);
+}
+window.FlagRoyale = { handleChat, handleGift, joinCountry, parseCountry, balls };
+
+/* ---------------- physics ---------------- */
+function hitCircle(b, px, py, pr, e) {
+  const dx = b.x - px, dy = b.y - py, min = b.r + pr, d2 = dx * dx + dy * dy;
+  if (d2 >= min * min) return false;
+  const d = Math.sqrt(d2) || .001, nx = dx / d, ny = dy / d;
+  b.x = px + nx * min; b.y = py + ny * min;
+  const vn = b.vx * nx + b.vy * ny;
+  if (vn < 0) { b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny; return -vn; }
+  return 0;
+}
+function hitSegment(b, x1, y1, x2, y2, half, w) {
+  const sx = x2 - x1, sy = y2 - y1, l2 = sx * sx + sy * sy;
+  let u = ((b.x - x1) * sx + (b.y - y1) * sy) / l2; u = Math.max(0, Math.min(1, u));
+  const px = x1 + sx * u, py = y1 + sy * u;
+  let dx = b.x - px, dy = b.y - py, d = Math.hypot(dx, dy); const min = b.r + half;
+  if (d >= min) return;
+  if (d < .001) { dx = 1; dy = 0; d = 1; }
+  const nx = dx / d, ny = dy / d;
+  b.x = px + nx * min; b.y = py + ny * min;
+  const svx = -w * (py - CY), svy = w * (px - CX);
+  let rx = b.vx - svx, ry = b.vy - svy; const vn = rx * nx + ry * ny;
+  if (vn < 0) { rx -= 2 * vn * nx; ry -= 2 * vn * ny; b.vx = rx + svx; b.vy = ry + svy; if (-vn > 160) burst(px, py, 3, '#ff6ad5', 160); }
+}
+
+function step(dt) {
+  omega = .55 + .45 * Math.sin(t * .4);
+  spokeAngle += omega * dt;
+  for (const b of balls) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  // pegs + core
+  for (const b of balls) {
+    for (const p of pegs) { const v = hitCircle(b, p.x, p.y, PEG_R, 1.12); if (v) { p.flash = 1; if (v > 120) burst(p.x, p.y, 5, '#ffe066', 220); } }
+    const cv2 = hitCircle(b, CX, CY, CORE, 1.0); if (cv2) corePulse = 1;
+    for (let i = 0; i < 3; i++) {
+      const a = spokeAngle + i * Math.PI * 2 / 3, ca = Math.cos(a), sa = Math.sin(a);
+      hitSegment(b, CX + ca * SPOKE_IN, CY + sa * SPOKE_IN, CX + ca * SPOKE_OUT, CY + sa * SPOKE_OUT, SPOKE_HALF, omega);
+    }
+  }
+  // ball vs ball
+  for (let i = 0; i < balls.length; i++) for (let j = i + 1; j < balls.length; j++) {
+    const a = balls[i], b = balls[j], dx = b.x - a.x, dy = b.y - a.y, min = a.r + b.r, d2 = dx * dx + dy * dy;
+    if (d2 >= min * min) continue;
+    const d = Math.sqrt(d2) || .001, nx = dx / d, ny = dy / d, ov = min - d, ma = a.r * a.r, mb = b.r * b.r, tm = ma + mb;
+    a.x -= nx * ov * mb / tm; a.y -= ny * ov * mb / tm; b.x += nx * ov * ma / tm; b.y += ny * ov * ma / tm;
+    const rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (rel < 0) { const imp = -(1.95) * rel / (1 / ma + 1 / mb); a.vx -= imp / ma * nx; a.vy -= imp / ma * ny; b.vx += imp / mb * nx; b.vy += imp / mb * ny; }
+  }
+  // wall + speed regulation
+  for (const b of balls) {
+    const dx = b.x - CX, dy = b.y - CY, d = Math.hypot(dx, dy);
+    if (d > AR - b.r) {
+      const nx = dx / d, ny = dy / d; b.x = CX + nx * (AR - b.r); b.y = CY + ny * (AR - b.r);
+      const vn = b.vx * nx + b.vy * ny;
+      if (vn > 0) { b.vx -= 2 * vn * nx; b.vy -= 2 * vn * ny; if (vn > 200) burst(b.x + nx * b.r, b.y + ny * b.r, 3, '#5fe6ff', 150); }
+    }
+    const sp = Math.hypot(b.vx, b.vy);
+    const k = sp < MIN_V ? 1 + 2.5 * dt : (sp > MAX_V ? 1 - 3 * dt : 1);
+    b.vx *= k; b.vy *= k;
+    if (b.pulse > 0) b.pulse = Math.max(0, b.pulse - dt * 1.6);
+  }
+  for (const p of pegs) p.flash = Math.max(0, p.flash - dt * 4);
+  corePulse = Math.max(0, corePulse - dt * 3);
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .98; p.vy *= .98; p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (const f of feed) f.age += dt;
+  t += dt;
+}
+
+/* ---------------- drawing ---------------- */
+function txt(s, x, y, size, fill, stroke, align) {
+  ctx.font = '900 ' + size + 'px "Segoe UI","Arial Black",Arial,sans-serif';
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  if (stroke) { ctx.lineWidth = size * .16; ctx.strokeStyle = stroke; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = fill; ctx.fillText(s, x, y);
+}
+function pill(x, y, w, h, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, h / 2) : ctx.rect(x, y, w, h); ctx.fill(); }
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(BG, 0, 0);
+  // twinkling stars
+  for (const s of stars) { ctx.globalAlpha = .35 + .65 * Math.abs(Math.sin(t * s.s + s.p)); ctx.fillStyle = '#fff'; ctx.fillRect(s.x, s.y, s.r, s.r); }
+  ctx.globalAlpha = 1;
+
+  // glowing arena wall
+  ctx.save(); ctx.lineWidth = 14; ctx.strokeStyle = '#22e6ff'; ctx.shadowColor = '#22e6ff'; ctx.shadowBlur = 28 + 10 * Math.sin(t * 2.2);
+  ctx.beginPath(); ctx.arc(CX, CY, AR + 7, 0, 7); ctx.stroke(); ctx.restore();
+  // chasing lights
+  for (let i = 0; i < 48; i++) {
+    const a = i * Math.PI * 2 / 48, br = Math.max(0, Math.cos(a * 3 - t * 2.4));
+    ctx.fillStyle = 'rgba(255,' + (120 + br * 120 | 0) + ',220,' + (.25 + br * .75) + ')';
+    ctx.beginPath(); ctx.arc(CX + Math.cos(a) * (AR + 30), CY + Math.sin(a) * (AR + 30), 4 + br * 3, 0, 7); ctx.fill();
+  }
+
+  // core
+  ctx.save();
+  const cr = CORE + corePulse * 6;
+  const cg = ctx.createRadialGradient(CX, CY, 4, CX, CY, cr);
+  cg.addColorStop(0, '#1c0b52'); cg.addColorStop(.75, '#3a1190'); cg.addColorStop(1, '#ff3cac');
+  ctx.shadowColor = '#ff3cac'; ctx.shadowBlur = 30 + corePulse * 40;
+  ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(CX, CY, cr, 0, 7); ctx.fill(); ctx.restore();
+  ctx.save(); ctx.setLineDash([14, 18]); ctx.lineDashOffset = -t * 40; ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(255,120,220,.85)';
+  ctx.beginPath(); ctx.arc(CX, CY, CORE + 18, 0, 7); ctx.stroke(); ctx.restore();
+  txt(String(balls.length), CX, CY - 8, 58, '#fff', '#2a0c70');
+  txt('ALIVE', CX, CY + 34, 20, '#ffd1f2', null);
+
+  // spokes
+  for (let i = 0; i < 3; i++) {
+    const a = spokeAngle + i * Math.PI * 2 / 3, ca = Math.cos(a), sa = Math.sin(a);
+    const x1 = CX + ca * SPOKE_IN, y1 = CY + sa * SPOKE_IN, x2 = CX + ca * SPOKE_OUT, y2 = CY + sa * SPOKE_OUT;
+    const lg = ctx.createLinearGradient(x1, y1, x2, y2); lg.addColorStop(0, '#ff3cac'); lg.addColorStop(1, '#8a4dff');
+    ctx.save(); ctx.lineCap = 'round'; ctx.shadowColor = '#ff3cac'; ctx.shadowBlur = 24;
+    ctx.strokeStyle = lg; ctx.lineWidth = SPOKE_HALF * 2; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); ctx.restore();
+  }
+  // pegs
+  for (const p of pegs) {
+    ctx.save(); ctx.shadowColor = '#ffe066'; ctx.shadowBlur = 10 + p.flash * 30;
+    ctx.fillStyle = p.flash > .05 ? '#fff6c2' : '#ffcc33'; ctx.beginPath(); ctx.arc(p.x, p.y, PEG_R + p.flash * 4, 0, 7); ctx.fill();
+    ctx.fillStyle = '#7a4a00'; ctx.beginPath(); ctx.arc(p.x, p.y, PEG_R * .45, 0, 7); ctx.fill(); ctx.restore();
+  }
+
+  // flag balls
+  for (const b of balls) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.ellipse(b.x + 5, b.y + b.r * .9, b.r * .9, b.r * .35, 0, 0, 7); ctx.fill();
+    if (b.pulse > 0) { ctx.strokeStyle = 'rgba(255,230,120,' + b.pulse + ')'; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(b.x, b.y, b.r + (1 - b.pulse) * 36, 0, 7); ctx.stroke(); }
+    ctx.drawImage(b.f.img, b.x - b.r, b.y - b.r, b.r * 2, b.r * 2);
+    txt(b.f.code, b.x, b.y + b.r + 16, 20, '#fff', '#000');
+    if (b.power > 1) { const bx = b.x + b.r * .75, by = b.y - b.r * .75; ctx.fillStyle = '#ff3cac'; ctx.beginPath(); ctx.arc(bx, by, 16, 0, 7); ctx.fill(); txt(String(b.power), bx, by + 1, 19, '#fff', null); }
+  }
+
+  // particles
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of particles) { ctx.globalAlpha = Math.max(0, p.life * 1.6); ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, 3.2, 0, 7); ctx.fill(); }
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+
+  // HUD: title
+  txt('WHERE ARE', CX, 345, 74, '#fff', '#2a0c70');
+  const tg = ctx.createLinearGradient(0, 380, 0, 470); tg.addColorStop(0, '#fff27a'); tg.addColorStop(1, '#ff9a2e');
+  txt('YOU FROM?', CX, 432, 112, tg, '#3b0a5e');
+  // HUD: pills
+  pill(50, 505, 190, 52, 'rgba(0,0,0,.5)'); txt('ROUND ' + round, 145, 532, 28, '#5fe6ff', null);
+  pill(840, 505, 190, 52, 'rgba(0,0,0,.5)'); txt('JOINS ' + totalJoins, 935, 532, 28, '#ffe066', null);
+  // HUD: call to action
+  const pulse = 1 + .03 * Math.sin(t * 4);
+  ctx.save(); ctx.translate(CX, 1358); ctx.scale(pulse, pulse);
+  txt('TYPE YOUR COUNTRY IN CHAT TO JOIN', 0, 0, 38, '#7df3ff', '#06223a'); ctx.restore();
+  // HUD: join feed
+  feed.forEach((f, i) => {
+    ctx.globalAlpha = Math.max(.25, 1 - i * .22);
+    ctx.drawImage(f.img, 110, 1398 + i * 58, 44, 44);
+    txt(f.text, 170, 1421 + i * 58, 32, '#fff', '#000', 'left');
+  });
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------- loop ---------------- */
+let last = performance.now(), acc = 0, autoTimer = 0;
+const DT = 1 / 120;
+function frame(now) {
+  acc += Math.min(.05, (now - last) / 1000); last = now;
+  while (acc >= DT) { step(DT); acc -= DT; }
+  autoTimer += 1 / 60;
+  if (document.getElementById('auto').checked && autoTimer > 1.4) { autoTimer = 0; randomJoin(); }
+  draw();
+  requestAnimationFrame(frame);
+}
+function randomJoin() {
+  const f = FLAGS[Math.random() * FLAGS.length | 0];
+  joinCountry(f, FAKE_USERS[Math.random() * FAKE_USERS.length | 0]);
+}
+
+/* ---------------- test controls + LIVE event bridge ---------------- */
+/* TikFinity Event API envelope: { event: "chat|gift|...", data: {...} }.
+   This browser client reads the local desktop bridge; it does not log into TikTok. */
+const $ = id => document.getElementById(id);
+const inp = $('inp');
+function doJoin() {
+  const v = inp.value.trim(); if (!v) return;
+  if (!handleChat('local-test-viewer', v)) setLastEvent('Test input not recognized: ' + v);
+  inp.value = '';
+}
+$('bJoin').onclick = doJoin;
+inp.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
+$('bRand').onclick = randomJoin;
+$('b10').onclick = () => { for (let i = 0; i < 10; i++) randomJoin(); };
+$('bClr').onclick = () => { balls.length = 0; feed.length = 0; totalJoins = 0; Object.keys(userCountry).forEach(k => delete userCountry[k]); };
+
+const LIVE_BRIDGE = {
+  socket: null, manual: false, retryTimer: null, retryDelay: 1500,
+  retryMax: 20000, reconnects: 0, events: 0, lastMessageAt: 0,
+  seen: new Map(), watchdog: null,
+  setStatus(message, state) {
+    $('connStatus').textContent = message;
+    $('connDot').className = 'dot' + (state ? ' ' + state : '');
+  },
+  setButtons(connected) {
+    $('bConnect').disabled = connected;
+    $('bDisconnect').disabled = !connected;
+  },
+  connect() {
+    this.disconnect(false);
+    this.manual = false;
+    const raw = $('wsEndpoint').value.trim();
+    let url;
+    try { url = new URL(raw); } catch (_) { this.setStatus('Invalid WebSocket URL', 'error'); setLastEvent('Enter a valid ws:// URL. Default: ws://localhost:21213/'); return; }
+    if (!['ws:', 'wss:'].includes(url.protocol)) { this.setStatus('Invalid protocol', 'error'); setLastEvent('WebSocket endpoint must use ws:// or wss://'); return; }
+    if (url.username || url.password) { this.setStatus('Credentials not allowed in URL', 'error'); setLastEvent('Do not put passwords or tokens in the WebSocket URL.'); return; }
+    if (url.protocol === 'ws:' && !['localhost','127.0.0.1','[::1]'].includes(url.hostname)) {
+      this.setStatus('Remote insecure endpoint blocked', 'error');
+      setLastEvent('For safety, this adapter only accepts local ws:// endpoints. Use localhost with TikFinity Desktop.'); return;
+    }
+    this.manual = false;
+    this.open(url.toString());
+  },
+  open(url) {
+    if (this.manual) return;
+    this.setStatus('Connecting to TikFinity…', '');
+    setLastEvent('Opening ' + url);
+    let ws;
+    try { ws = new WebSocket(url); }
+    catch (err) { this.failed('Could not create WebSocket: ' + (err.message || 'unknown error')); return; }
+    this.socket = ws;
+    ws.onopen = () => {
+      if (this.socket !== ws) return;
+      this.retryDelay = 1500; this.lastMessageAt = Date.now();
+      this.setStatus('Connected · waiting for LIVE events', 'online'); this.setButtons(true);
+      setLastEvent('Connected to local event bridge. Start/confirm your TikTok LIVE in TikFinity.');
+      this.startWatchdog();
+    };
+    ws.onmessage = event => {
+      if (this.socket !== ws) return;
+      this.lastMessageAt = Date.now();
+      try { this.handlePacket(JSON.parse(event.data)); }
+      catch (err) { setLastEvent('Ignored malformed event: ' + (err.message || 'invalid JSON')); }
+    };
+    ws.onerror = () => { if (this.socket === ws) setLastEvent('WebSocket error. Check TikFinity Desktop and its Event API.'); };
+    ws.onclose = event => {
+      if (this.socket !== ws) return;
+      this.socket = null; this.stopWatchdog(); this.setButtons(false);
+      if (this.manual) { this.setStatus('Disconnected · demo mode', ''); return; }
+      this.failed('Connection closed (' + event.code + '). Retrying…');
+    };
+  },
+  failed(message) {
+    this.setStatus('Connection unavailable', 'error'); setLastEvent(message);
+    if (this.manual || this.retryTimer) return;
+    const wait = this.retryDelay;
+    this.retryDelay = Math.min(this.retryMax, Math.round(this.retryDelay * 1.8));
+    this.reconnects++; $('reconnectCount').textContent = String(this.reconnects);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      const current = $('wsEndpoint').value.trim();
+      this.open(current);
+    }, wait);
+  },
+  disconnect(markManual = true) {
+    if (markManual) this.manual = true;
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+    this.stopWatchdog();
+    const ws = this.socket; this.socket = null;
+    if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(1000, 'User disconnected'); } catch (_) {} }
+    this.setButtons(false);
+    if (markManual) { this.setStatus('Disconnected · demo mode', ''); setLastEvent('LIVE bridge disconnected. Local demo controls remain available.'); }
+  },
+  startWatchdog() {
+    this.stopWatchdog();
+    this.watchdog = setInterval(() => {
+      if (this.socket && this.socket.readyState === WebSocket.OPEN && Date.now() - this.lastMessageAt > 90000) {
+        setLastEvent('No events received for 90 seconds. Connection is still open; verify LIVE is active.');
+      }
+    }, 15000);
+  },
+  stopWatchdog() { if (this.watchdog) clearInterval(this.watchdog); this.watchdog = null; },
+  handlePacket(packet) {
+    if (!packet || typeof packet !== 'object' || Array.isArray(packet)) return;
+    const type = String(packet.event || packet.type || '').toLowerCase();
+    const data = packet.data && typeof packet.data === 'object' ? packet.data : packet;
+    if (!type) return;
+    this.events++; $('eventCount').textContent = String(this.events);
+    const userObj = data.user && typeof data.user === 'object' ? data.user : {};
+    const username = String(data.uniqueId || data.unique_id || data.username || data.userName || userObj.uniqueId || userObj.unique_id || userObj.username || userObj.nickname || data.nickname || data.nickName || data.userId || 'LIVE viewer').slice(0, 80);
+    if (type === 'chat' || type === 'comment' || type === 'webcast_chat') {
+      const comment = String(data.comment || data.text || data.content || data.message || '').slice(0, 500);
+      if (comment && handleChat(username, comment)) setLastEvent('@' + username + ' joined: ' + (parseCountry(comment)?.name || comment));
+      else if (comment) setLastEvent('Chat received from @' + username + ' (no country command): ' + comment);
+      return;
+    }
+    if (type === 'gift' || type === 'webcast_gift') {
+      const giftObj = data.gift && typeof data.gift === 'object' ? data.gift : {};
+      const repeatEnd = data.repeatEnd ?? data.repeat_end ?? data.streakEnd ?? data.streak_end;
+      const repeatCount = Number(data.repeatCount ?? data.repeat_count ?? data.combo ?? 1);
+      if (repeatEnd === false || (repeatCount > 1 && repeatEnd !== true)) { setLastEvent('Gift streak in progress from @' + username); return; }
+      const diamonds = Number(data.diamondCount ?? data.diamond_count ?? data.coins ?? giftObj.diamondCount ?? giftObj.diamond_count ?? 1);
+      const giftName = String(data.giftName || data.gift_name || giftObj.name || giftObj.describe || 'Gift').slice(0, 80);
+      const dedupeId = String(data.msgId || data.messageId || data.eventId || '');
+      if (dedupeId && this.seen.has(dedupeId)) return;
+      if (dedupeId) { this.seen.set(dedupeId, Date.now()); if (this.seen.size > 300) this.seen.delete(this.seen.keys().next().value); }
+      handleGift(username, giftName, Number.isFinite(diamonds) && diamonds > 0 ? diamonds : 1);
+      setLastEvent('Gift: @' + username + ' sent ' + giftName + ' (' + Math.max(1, diamonds || 1) + ' diamonds)');
+      return;
+    }
+    if (type === 'like' || type === 'share' || type === 'follow' || type === 'roomuser' || type === 'subscribe') {
+      setLastEvent(type.toUpperCase() + ' event received from @' + username); return;
+    }
+    setLastEvent('Received event: ' + type);
+  }
+};
+function setLastEvent(message) { $('lastEvent').textContent = String(message).slice(0, 260); }
+$('bConnect').onclick = () => LIVE_BRIDGE.connect();
+$('bDisconnect').onclick = () => LIVE_BRIDGE.disconnect(true);
+window.addEventListener('beforeunload', () => LIVE_BRIDGE.disconnect(true));
+
+// Stable public adapter for a local relay or a future approved provider.
+window.FlagRoyale = Object.assign(window.FlagRoyale || {}, {
+  bridge: LIVE_BRIDGE,
+  ingestEvent: packet => LIVE_BRIDGE.handlePacket(packet),
+  disconnectLive: () => LIVE_BRIDGE.disconnect(true)
+});
+window.addEventListener('keydown', e => {
+  if (e.target && ['INPUT','TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key.toLowerCase() === 'h') document.body.classList.toggle('clean');
+});
+if (location.search.includes('clean')) document.body.classList.add('clean');
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
